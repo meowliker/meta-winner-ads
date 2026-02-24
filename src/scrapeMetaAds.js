@@ -430,7 +430,7 @@ async function scrapeMetaAds(competitor, options) {
       }
     });
 
-    async function handleGraphqlJson(json) {
+        async function handleGraphqlJson(json) {
       if (!json) return;
       const tempMap = new Map();
       extractAdsFromNode(json, tempMap);
@@ -442,14 +442,41 @@ async function scrapeMetaAds(competitor, options) {
       graphqlAdIds = adMap.size;
     }
 
+    let graphqlDebugLogged = false;
+
+    async function parseGraphqlResponse(res) {
+      const ct = String(res.headers()['content-type'] || '').toLowerCase();
+      const ctOk = ct.includes('application/json') || ct.includes('text/plain') || ct.includes('json');
+      if (!ctOk) return null;
+
+      const raw = await res.text().catch(() => '');
+      if (!raw) return null;
+
+      let cleaned = raw.trim();
+      if (cleaned.startsWith('for (;;);')) {
+        cleaned = cleaned.slice('for (;;);'.length).trim();
+      }
+      if (cleaned.startsWith(")]}',")) {
+        cleaned = cleaned.slice(5).trim();
+      }
+
+      try {
+        return JSON.parse(cleaned);
+      } catch (err) {
+        if (!graphqlDebugLogged && graphqlParsed === 0 && graphqlResponsesSeen >= 3) {
+          console.log('[graphql] parse failed ct=' + (ct || 'n/a') + ' body=' + cleaned.slice(0, 80));
+          graphqlDebugLogged = true;
+        }
+        return null;
+      }
+    }
+
     page.on('response', async (res) => {
       try {
         const resUrl = res.url();
         if (!resUrl.includes('graphql')) return;
         graphqlResponsesSeen += 1;
-        const ct = String(res.headers()['content-type'] || '').toLowerCase();
-        if (!ct.includes('application/json')) return;
-        const json = await res.json().catch(() => null);
+        const json = await parseGraphqlResponse(res);
         if (!json) return;
         graphqlParsed += 1;
 
@@ -469,9 +496,7 @@ async function scrapeMetaAds(competitor, options) {
         if (!res) return;
         const resUrl = res.url();
         if (!resUrl.includes('graphql')) return;
-        const ct = String(res.headers()['content-type'] || '').toLowerCase();
-        if (!ct.includes('application/json')) return;
-        const json = await res.json().catch(() => null);
+        const json = await parseGraphqlResponse(res);
         if (!json) return;
         graphqlParsed += 1;
         await handleGraphqlJson(json);
