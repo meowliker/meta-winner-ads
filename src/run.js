@@ -7,6 +7,7 @@ const { scoreWinners } = require('./scoreWinners');
 const { postWebhook } = require('./postWebhook');
 const { discoverPages } = require('./discoverPages');
 const { extractLandingFromSnapshot, getSnapshotBrowser } = require('./snapshotLanding');
+const { normalizeCompetitorInputs, buildAdLibraryUrl } = require('./competitorUrl');
 
 function loadLocalEnv() {
   const dotenvPath = path.join(process.cwd(), '.env');
@@ -18,14 +19,6 @@ function loadLocalEnv() {
 function parseYes(value) {
   if (!value) return false;
   return ['y', 'yes', 'true', '1'].includes(String(value).trim().toLowerCase());
-}
-
-function parseCompetitorUrls(raw) {
-  const normalized = raw || '';
-  return normalized
-    .split(/\r?\n|\\n/g)
-    .map((line) => line.trim())
-    .filter(Boolean);
 }
 
 function parseSeedKeywords(raw) {
@@ -79,6 +72,7 @@ function domainFromUrl(url) {
 
 async function main() {
   const isLocal = process.argv.includes('--local');
+  const printUrlsOnly = process.argv.includes('--print-urls');
   if (isLocal) {
     loadLocalEnv();
   }
@@ -103,12 +97,13 @@ async function main() {
   console.log(`[startup] WEBHOOK_URL endsWith /exec: ${String(webhookUrl).trim().endsWith('/exec')}`);
   console.log(`[startup] WEBHOOK_TOKEN length: ${String(webhookToken).trim().length}`);
 
-  const competitorUrls = parseCompetitorUrls(competitorRaw);
+  const competitorInputs = normalizeCompetitorInputs(competitorRaw);
   const seedKeywords = parseSeedKeywords(seedRaw);
   const discoveryLimit = Number.parseInt(discoveryLimitRaw || '30', 10) || 30;
   const countries = parseCountries(countriesRaw || 'ALL');
+  const primaryCountry = countries[0] || 'ALL';
 
-  if (competitorUrls.length === 0 && seedKeywords.length === 0) {
+  if (competitorInputs.length === 0 && seedKeywords.length === 0) {
     console.error('No competitor URLs or seed keywords provided.');
     process.exit(1);
   }
@@ -174,14 +169,40 @@ async function main() {
     const params = new URLSearchParams({
       active_status: 'active',
       ad_type: 'all',
-      country: countries[0] || 'ALL',
+      country: primaryCountry,
       search_type: 'page',
       view_all_page_id: page.id
     });
     return `https://www.facebook.com/ads/library/?${params.toString()}`;
   });
 
-  const allCompetitors = [...competitorUrls, ...discoveredUrls];
+  const competitorResolved = [];
+  for (const input of competitorInputs) {
+    const built = buildAdLibraryUrl(input, { country: primaryCountry });
+    if (!built.finalUrl) {
+      console.error(`[competitor] BAD URL: ${input} (${built.reason})`);
+      continue;
+    }
+    console.log(`[competitor] raw: ${input}`);
+    console.log(`[competitor] finalUrl: ${built.finalUrl}`);
+    console.log(`[competitor] pageId: ${built.pageId || 'n/a'}`);
+
+    if (!built.finalUrl.includes('view_all_page_id=') && !built.finalUrl.includes('search_term=')) {
+      console.error(`[competitor] BAD URL: ${input} (missing view_all_page_id or search_term)`);
+      continue;
+    }
+
+    competitorResolved.push(built.finalUrl);
+  }
+
+  if (printUrlsOnly) {
+    for (const url of competitorResolved) {
+      console.log(`[print-urls] ${url}`);
+    }
+    return;
+  }
+
+  const allCompetitors = [...competitorResolved, ...discoveredUrls];
   const dedupedCompetitors = Array.from(new Set(allCompetitors));
 
   cache = {

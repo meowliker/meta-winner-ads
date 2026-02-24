@@ -1,5 +1,5 @@
 const { chromium } = require('playwright');
-const { withRetries, launchBrowser } = require('./scrapeMetaAds');
+const { withRetries, launchBrowser, createContext } = require('./scrapeMetaAds');
 
 function buildSearchUrl(keyword, country) {
   const params = new URLSearchParams({
@@ -16,7 +16,8 @@ async function discoverPages(keyword, country, options) {
   const { headful, maxScrolls = 6 } = options || {};
   const launchInfo = await launchBrowser(headful);
   const browser = launchInfo.browser;
-  const page = await browser.newPage({ viewport: { width: 1365, height: 900 } });
+  const context = await createContext(browser);
+  const page = await context.newPage();
 
   try {
     const url = buildSearchUrl(keyword, country);
@@ -75,6 +76,7 @@ async function discoverPages(keyword, country, options) {
     return pages;
   } finally {
     await page.close().catch(() => {});
+    await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 }

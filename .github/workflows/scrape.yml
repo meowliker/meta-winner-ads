@@ -32,4 +32,12 @@ jobs:
           DISCOVERY_LIMIT: ${{ secrets.DISCOVERY_LIMIT }}
           COUNTRIES: ${{ secrets.COUNTRIES }}
           COMPETITOR_URLS: ${{ secrets.COMPETITOR_URLS }}
-        run: npm run scrape:local
+        run: npm run scrape
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-artifacts
+          path: artifacts
+          if-no-files-found: ignore

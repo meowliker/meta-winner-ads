@@ -28,7 +28,14 @@ async function withRetries(fn, retries = 3) {
 }
 
 async function launchBrowser(headful) {
-  const baseOptions = { headless: !headful };
+  const baseOptions = {
+    headless: !headful,
+    args: [
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-blink-features=AutomationControlled'
+    ]
+  };
 
   try {
     const browser = await chromium.launch({ ...baseOptions, channel: 'chrome' });
@@ -54,30 +61,53 @@ async function launchBrowser(headful) {
   }
 }
 
+function createContext(browser) {
+  return browser.newContext({
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    viewport: { width: 1280, height: 720 }
+  });
+}
+
 async function waitForStableLoad(page) {
   await page.waitForLoadState('domcontentloaded');
-  await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(3000);
 }
 
 async function tryAcceptCookies(page) {
-  const labels = [
-    'Allow all cookies',
-    'Accept all',
-    'Accept',
-    'Only allow essential cookies'
+  const strategies = [
+    { label: 'Allow all cookies', selector: 'button:has-text("Allow all cookies")' },
+    { label: 'Accept all', selector: 'button:has-text("Accept all")' },
+    { label: 'Allow essential and optional', selector: 'button:has-text("Allow essential and optional")' },
+    { label: 'Accept', selector: 'button:has-text("Accept")' },
+    { label: 'Role accept/allow', role: true }
   ];
-  for (const label of labels) {
+
+  for (const strategy of strategies) {
     try {
-      const btn = page.getByRole('button', { name: label, exact: false });
-      if (await btn.count()) {
-        await btn.first().click({ timeout: 3000 }).catch(() => {});
+      if (strategy.role) {
+        const btn = page.getByRole('button', { name: /allow|accept/i });
+        if (await btn.count()) {
+          await btn.first().click({ timeout: 3000 }).catch(() => {});
+          console.log('[cookie] accepted: yes (role accept/allow)');
+          return true;
+        }
+        continue;
+      }
+
+      const locator = page.locator(strategy.selector);
+      if (await locator.count()) {
+        await locator.first().click({ timeout: 3000 }).catch(() => {});
+        console.log(`[cookie] accepted: yes (${strategy.label})`);
         return true;
       }
     } catch (err) {
       // ignore
     }
   }
+
+  console.log('[cookie] accepted: no');
   return false;
 }
 
@@ -312,16 +342,78 @@ async function runFallbackScroll(page) {
   await page.waitForTimeout(2000);
 }
 
+function shouldSkipCompetitorUrl(url) {
+  return !url.includes('view_all_page_id=') && !url.includes('search_term=');
+}
+
+async function extractAdLinksFromDom(page) {
+  const data = await page.evaluate(() => {
+    const anchors = Array.from(document.querySelectorAll('a[href]'));
+    const hrefs = anchors.map((a) => a.getAttribute('href') || '');
+    return { total: anchors.length, hrefs };
+  });
+
+  const candidates = data.hrefs.filter((href) =>
+    href.includes('/ads/library/') && (href.includes('ad_archive_id=') || href.includes('id='))
+      || href.includes('ad_archive_id')
+  );
+
+  const normalized = candidates.map((href) => {
+    if (href.startsWith('http')) return href;
+    if (href.startsWith('/')) return `https://www.facebook.com${href}`;
+    return `https://www.facebook.com/${href}`;
+  });
+
+  const unique = Array.from(new Set(normalized));
+  console.log(`[dom] anchors scanned: ${data.total}, ad links found: ${unique.length}`);
+  return unique;
+}
+
+async function waitForAdSignals(page) {
+  try {
+    await page.waitForFunction(() => {
+      const anchors = Array.from(document.querySelectorAll('a[href]'));
+      return anchors.some((a) => {
+        const href = a.getAttribute('href') || '';
+        return href.includes('ad_archive_id') || href.includes('/ads/library/?id=');
+      });
+    }, { timeout: 15000 });
+    return true;
+  } catch (err) {
+    return false;
+  }
+}
+
 async function scrapeMetaAds(url, options) {
-  const { headful, maxAds = 30, isLocal, pauseOnLoginWall } = options;
+  const { headful, maxAds = 30, isLocal, pauseOnLoginWall, competitorIndex } = options;
+  if (shouldSkipCompetitorUrl(url)) {
+    console.error(`[competitor] BAD URL: ${url} (missing view_all_page_id or search_term)`);
+    return {
+      ads: [],
+      finalUrl: url,
+      cookieAccepted: false,
+      loginWall: false,
+      adLinksFound: 0,
+      graphqlAdsCollected: 0,
+      graphqlResponsesSeen: 0,
+      graphqlParsed: 0,
+      graphqlAdIds: 0,
+      domAdLinksFound: 0
+    };
+  }
+
   const launchInfo = await launchBrowser(headful);
   const browser = launchInfo.browser;
-  const page = await browser.newPage({ viewport: { width: 1365, height: 900 } });
+  const context = await createContext(browser);
+  const page = await context.newPage();
 
   try {
     let finalUrl = url;
     const graphqlPayloads = [];
     const adMap = new Map();
+    let graphqlResponsesSeen = 0;
+    let graphqlParsed = 0;
+    let graphqlAdIds = 0;
 
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
@@ -329,24 +421,51 @@ async function scrapeMetaAds(url, options) {
       }
     });
 
+    async function handleGraphqlJson(json) {
+      if (!json) return;
+      const tempMap = new Map();
+      extractAdsFromNode(json, tempMap);
+      for (const [id, ad] of tempMap.entries()) {
+        if (!adMap.has(id)) {
+          adMap.set(id, ad);
+        }
+      }
+      graphqlAdIds = adMap.size;
+    }
+
     page.on('response', async (res) => {
       try {
         const resUrl = res.url();
-        if (!resUrl.includes('/api/graphql/')) return;
+        if (!resUrl.includes('graphql')) return;
+        graphqlResponsesSeen += 1;
+        const ct = String(res.headers()['content-type'] || '').toLowerCase();
+        if (!ct.includes('application/json')) return;
         const json = await res.json().catch(() => null);
         if (!json) return;
+        graphqlParsed += 1;
 
         if (graphqlPayloads.length < 20) {
           graphqlPayloads.push(json);
         }
 
-        const tempMap = new Map();
-        extractAdsFromNode(json, tempMap);
-        for (const [id, ad] of tempMap.entries()) {
-          if (!adMap.has(id)) {
-            adMap.set(id, ad);
-          }
-        }
+        await handleGraphqlJson(json);
+      } catch (err) {
+        // ignore
+      }
+    });
+
+    page.on('requestfinished', async (req) => {
+      try {
+        const res = await req.response();
+        if (!res) return;
+        const resUrl = res.url();
+        if (!resUrl.includes('graphql')) return;
+        const ct = String(res.headers()['content-type'] || '').toLowerCase();
+        if (!ct.includes('application/json')) return;
+        const json = await res.json().catch(() => null);
+        if (!json) return;
+        graphqlParsed += 1;
+        await handleGraphqlJson(json);
       } catch (err) {
         // ignore
       }
@@ -370,9 +489,20 @@ async function scrapeMetaAds(url, options) {
           cookieAccepted,
           loginWall,
           adLinksFound: 0,
-          graphqlAdsCollected: 0
+          graphqlAdsCollected: 0,
+          graphqlResponsesSeen,
+          graphqlParsed,
+          graphqlAdIds,
+          domAdLinksFound: 0
         };
       }
+    }
+
+    const adSignalFound = await waitForAdSignals(page);
+    if (!adSignalFound) {
+      await page.reload({ waitUntil: 'domcontentloaded' });
+      await waitForStableLoad(page);
+      await waitForAdSignals(page);
     }
 
     for (let i = 0; i < 12; i += 1) {
@@ -394,8 +524,12 @@ async function scrapeMetaAds(url, options) {
       await runFallbackScroll(page);
     }
 
+    const domLinks = await extractAdLinksFromDom(page);
+    const domAdLinksFound = domLinks.length;
+
     const graphqlAdsCollected = adMap.size;
     console.log(`[scrape] GraphQL ads collected: ${graphqlAdsCollected}`);
+    console.log(`[scrape] GraphQL responses seen: ${graphqlResponsesSeen}, parsed: ${graphqlParsed}, ad ids: ${graphqlAdIds}`);
 
     if (graphqlAdsCollected === 0 && isLocal) {
       const debugDir = path.join(process.cwd(), 'debug');
@@ -413,18 +547,39 @@ async function scrapeMetaAds(url, options) {
 
     const normalized = normalizeAds(adMap).slice(0, maxAds);
 
+    if (domAdLinksFound === 0 && graphqlAdsCollected === 0) {
+      const artifactsDir = path.join(process.cwd(), 'artifacts');
+      fs.mkdirSync(artifactsDir, { recursive: true });
+      const idx = typeof competitorIndex === 'number' ? competitorIndex : 0;
+      const screenshotPath = path.join(artifactsDir, `${idx}-no-ads.png`);
+      const htmlPath = path.join(artifactsDir, `${idx}-page.html`);
+      const logPath = path.join(artifactsDir, `${idx}-log.txt`);
+
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+      const html = await page.content().catch(() => '');
+      if (html) {
+        fs.writeFileSync(htmlPath, html.slice(0, 200 * 1024));
+      }
+      fs.writeFileSync(logPath, `finalUrl=${finalUrl}\ncookieAccepted=${cookieAccepted}\nloginWall=${loginWall}\n`);
+    }
+
     return {
       ads: normalized,
       finalUrl: finalUrl || page.url(),
       cookieAccepted,
       loginWall: false,
       adLinksFound: graphqlAdsCollected,
-      graphqlAdsCollected
+      graphqlAdsCollected,
+      graphqlResponsesSeen,
+      graphqlParsed,
+      graphqlAdIds,
+      domAdLinksFound
     };
   } finally {
     await page.close().catch(() => {});
+    await context.close().catch(() => {});
     await browser.close().catch(() => {});
   }
 }
 
-module.exports = { scrapeMetaAds, withRetries, launchBrowser };
+module.exports = { scrapeMetaAds, withRetries, launchBrowser, createContext };
