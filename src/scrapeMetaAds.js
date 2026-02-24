@@ -1,3 +1,4 @@
+console.log("GRAPHQL_DEBUG_MARKER: scrapeMetaAds.js loaded");
 console.log("[version] scrapeMetaAds.js stamp: 2026-02-24-finalUrl-v1");
 const { chromium } = require('playwright');
 const fs = require('fs');
@@ -386,6 +387,7 @@ async function waitForAdSignals(page) {
 }
 
 async function scrapeMetaAds(competitor, options) {
+  console.log("GRAPHQL_DEBUG_MARKER: competitor start");
   const { headful, maxAds = 30, isLocal, pauseOnLoginWall, competitorIndex } = options;
   const finalUrlInput = competitor && competitor.finalUrl ? competitor.finalUrl : '';
   const rawInput = competitor && competitor.raw ? competitor.raw : '';
@@ -424,6 +426,27 @@ async function scrapeMetaAds(competitor, options) {
     let graphqlParsed = 0;
     let graphqlAdIds = 0;
     let graphqlDebugPrinted = false;
+
+    async function printGraphqlDebugOnce(tag, response) {
+      if (graphqlDebugPrinted) return;
+      graphqlDebugPrinted = true;
+      try {
+        const headers = response && response.headers ? response.headers() : {};
+        const ct = headers['content-type'] || headers['Content-Type'] || '';
+        let sample = '';
+        if (response && response.text) {
+          const raw = await response.text();
+          sample = String(raw || '').slice(0, 200);
+        } else {
+          sample = '(no response object)';
+        }
+        console.log(`GRAPHQL_DEBUG_MARKER: ${tag} content-type=${ct}`);
+        console.log(`GRAPHQL_DEBUG_MARKER: ${tag} first200=${sample}`);
+      } catch (e) {
+        console.log(`GRAPHQL_DEBUG_MARKER: ${tag} failed_to_read=${String(e && e.message ? e.message : e)}`);
+      }
+    }
+
 
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
@@ -477,6 +500,7 @@ async function scrapeMetaAds(competitor, options) {
         const resUrl = res.url();
         if (!resUrl.includes('graphql')) return;
         graphqlResponsesSeen += 1;
+        await printGraphqlDebugOnce("graphql-response", res);
         if (!graphqlDebugPrinted) {
           graphqlDebugPrinted = true;
           try {
@@ -542,6 +566,10 @@ async function scrapeMetaAds(competitor, options) {
     await page.goto(finalUrlInput, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await waitForStableLoad(page);
 
+    if (!graphqlDebugPrinted) {
+      console.log("GRAPHQL_DEBUG_MARKER: no graphql responses captured yet");
+    }
+
     const cookieAccepted = await tryAcceptCookies(page);
     await waitForStableLoad(page);
 
@@ -598,6 +626,7 @@ async function scrapeMetaAds(competitor, options) {
     const graphqlAdsCollected = adMap.size;
     console.log(`[scrape] GraphQL ads collected: ${graphqlAdsCollected}`);
     console.log(`[scrape] GraphQL responses seen: ${graphqlResponsesSeen}, parsed: ${graphqlParsed}, ad ids: ${graphqlAdIds}`);
+    console.log(`GRAPHQL_DEBUG_MARKER: summary responsesSeen=${graphqlResponsesSeen} parsed=${graphqlParsed} ids=${graphqlAdIds} domLinks=${domAdLinksFound} cookieAccepted=${cookieAccepted ? 'yes' : 'no'}`);
 
     if (graphqlAdsCollected === 0 && isLocal) {
       const debugDir = path.join(process.cwd(), 'debug');
@@ -651,3 +680,4 @@ async function scrapeMetaAds(competitor, options) {
 }
 
 module.exports = { scrapeMetaAds, withRetries, launchBrowser, createContext };
+

@@ -14,6 +14,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Print commit SHA
+        run: |
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          git rev-parse HEAD
+          git log -1 --oneline
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

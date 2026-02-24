@@ -1,3 +1,4 @@
+console.log("GRAPHQL_DEBUG_MARKER: run.js started");
 require('dotenv').config();
 
 const fs = require('fs');
@@ -315,3 +316,4 @@ main().catch((err) => {
   console.error(`Fatal error: ${err.message}`);
   process.exit(1);
 });
+
