@@ -423,6 +423,7 @@ async function scrapeMetaAds(competitor, options) {
     let graphqlResponsesSeen = 0;
     let graphqlParsed = 0;
     let graphqlAdIds = 0;
+    let graphqlDebugPrinted = false;
 
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
@@ -443,7 +444,6 @@ async function scrapeMetaAds(competitor, options) {
     }
 
     let graphqlDebugLogged = false;
-    let graphqlFirstResponseLogged = false;
 
     async function parseGraphqlResponse(res) {
       const ct = String(res.headers()['content-type'] || '').toLowerCase();
@@ -452,12 +452,6 @@ async function scrapeMetaAds(competitor, options) {
 
       const raw = await res.text().catch(() => '');
       if (!raw) return null;
-
-      if (!graphqlFirstResponseLogged && graphqlResponsesSeen === 1) {
-        console.log('[graphql-debug] content-type:', res.headers()['content-type']);
-        console.log('[graphql-debug] first 200 chars:', raw.slice(0, 200));
-        graphqlFirstResponseLogged = true;
-      }
 
       let cleaned = raw.trim();
       if (cleaned.startsWith('for (;;);')) {
@@ -483,6 +477,18 @@ async function scrapeMetaAds(competitor, options) {
         const resUrl = res.url();
         if (!resUrl.includes('graphql')) return;
         graphqlResponsesSeen += 1;
+        if (!graphqlDebugPrinted) {
+          graphqlDebugPrinted = true;
+          try {
+            const headers = res.headers ? res.headers() : {};
+            const ct = headers['content-type'] || headers['Content-Type'] || '';
+            const raw = await res.text();
+            console.log('[graphql-debug] content-type:', ct);
+            console.log('[graphql-debug] first 200 chars:', String(raw || '').slice(0, 200));
+          } catch (e) {
+            console.log('[graphql-debug] failed to read response body:', String(e && e.message ? e.message : e));
+          }
+        }
         const json = await parseGraphqlResponse(res);
         if (!json) return;
         graphqlParsed += 1;
