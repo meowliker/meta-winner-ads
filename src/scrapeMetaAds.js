@@ -78,30 +78,57 @@ async function waitForStableLoad(page) {
 }
 
 async function tryAcceptCookies(page) {
-  const strategies = [
-    { label: 'Allow all cookies', selector: 'button:has-text("Allow all cookies")' },
-    { label: 'Accept all', selector: 'button:has-text("Accept all")' },
-    { label: 'Allow essential and optional', selector: 'button:has-text("Allow essential and optional")' },
-    { label: 'Accept', selector: 'button:has-text("Accept")' },
-    { label: 'Role accept/allow', role: true }
+  const buttonRegex = /allow all|accept all|accept|agree|allow cookies|only allow essential/i;
+  const textCandidates = [
+    'Allow all cookies',
+    'Allow all',
+    'Accept all',
+    'Accept',
+    'Agree',
+    'Only allow essential cookies'
   ];
 
-  for (const strategy of strategies) {
+  const frames = page.frames();
+  for (const frame of frames) {
     try {
-      if (strategy.role) {
-        const btn = page.getByRole('button', { name: /allow|accept/i });
-        if (await btn.count()) {
-          await btn.first().click({ timeout: 3000 }).catch(() => {});
-          console.log('[cookie] accepted: yes (role accept/allow)');
+      const roleBtn = frame.getByRole('button', { name: buttonRegex });
+      if (await roleBtn.count()) {
+        await roleBtn.first().click({ timeout: 1500 }).catch(() => {});
+        console.log('[cookie] accepted: yes (role button)');
+        return true;
+      }
+    } catch (err) {
+      // ignore
+    }
+
+    for (const text of textCandidates) {
+      try {
+        const locator = frame.locator('button:has-text("' + text + '")');
+        if (await locator.count()) {
+          await locator.first().click({ timeout: 1500 }).catch(() => {});
+          console.log('[cookie] accepted: yes (' + text + ')');
           return true;
         }
-        continue;
+      } catch (err) {
+        // ignore
       }
+    }
 
-      const locator = page.locator(strategy.selector);
-      if (await locator.count()) {
-        await locator.first().click({ timeout: 3000 }).catch(() => {});
-        console.log(`[cookie] accepted: yes (${strategy.label})`);
+    try {
+      const clicked = await frame.evaluate((labels) => {
+        const elements = Array.from(document.querySelectorAll('button, div, span'));
+        for (const el of elements) {
+          const text = (el.innerText || '').trim();
+          if (!text) continue;
+          if (labels.some((label) => text.toLowerCase().includes(label.toLowerCase()))) {
+            el.click();
+            return true;
+          }
+        }
+        return false;
+      }, textCandidates);
+      if (clicked) {
+        console.log('[cookie] accepted: yes (frame eval)');
         return true;
       }
     } catch (err) {
@@ -272,11 +299,19 @@ function extractSnapshotUrl(node) {
   return node.ad_snapshot_url || node.adSnapshotUrl || '';
 }
 
+function extractAdIdFromString(value, adMap) {
+  if (!value || typeof value !== 'string') return;
+  const matchId = value.match(/ad_archive_id=(\d+)/);
+  if (matchId && matchId[1]) {
+    pushAd(adMap, { ad_archive_id: String(matchId[1]) });
+  }
+}
+
 function extractAdsFromNode(node, adMap) {
   if (!node || typeof node !== 'object') return;
 
-  if (node.ad_archive_id || node.adArchiveID) {
-    const adId = node.ad_archive_id || node.adArchiveID;
+  if (node.ad_archive_id || node.adArchiveID || node.archive_id) {
+    const adId = node.ad_archive_id || node.adArchiveID || node.archive_id;
     const ad = {
       ad_archive_id: String(adId),
       started_running_on: node.started_running_on || node.startedRunningOn || node.start_time || null,
@@ -310,6 +345,9 @@ function extractAdsFromNode(node, adMap) {
 
   for (const key of Object.keys(node)) {
     const value = node[key];
+    if (typeof value === 'string') {
+      extractAdIdFromString(value, adMap);
+    }
     if (value && typeof value === 'object') {
       extractAdsFromNode(value, adMap);
     }
@@ -426,6 +464,7 @@ async function scrapeMetaAds(competitor, options) {
     let graphqlParsed = 0;
     let graphqlAdIds = 0;
     let graphqlDebugPrinted = false;
+    let graphqlParseFailedLogged = false;
 
     async function printGraphqlDebugOnce(tag, response) {
       if (graphqlDebugPrinted) return;
@@ -466,30 +505,25 @@ async function scrapeMetaAds(competitor, options) {
       graphqlAdIds = adMap.size;
     }
 
-    let graphqlDebugLogged = false;
-
-    async function parseGraphqlResponse(res) {
-      const ct = String(res.headers()['content-type'] || '').toLowerCase();
-      const ctOk = ct.includes('application/json') || ct.includes('text/plain') || ct.includes('json');
-      if (!ctOk) return null;
-
-      const raw = await res.text().catch(() => '');
+    function parseGraphqlText(raw) {
       if (!raw) return null;
-
-      let cleaned = raw.trim();
+      let cleaned = String(raw).trim();
       if (cleaned.startsWith('for (;;);')) {
         cleaned = cleaned.slice('for (;;);'.length).trim();
       }
       if (cleaned.startsWith(")]}',")) {
         cleaned = cleaned.slice(5).trim();
       }
-
+      const firstChar = cleaned[0] || '';
+      if (firstChar !== '{' && firstChar !== '[') {
+        return null;
+      }
       try {
         return JSON.parse(cleaned);
       } catch (err) {
-        if (!graphqlDebugLogged && graphqlParsed === 0 && graphqlResponsesSeen >= 3) {
-          console.log('[graphql] parse failed ct=' + (ct || 'n/a') + ' body=' + cleaned.slice(0, 80));
-          graphqlDebugLogged = true;
+        if (!graphqlParseFailedLogged) {
+          console.log('GRAPHQL_DEBUG_MARKER: json_parse_failed err=' + (err && err.message ? err.message : String(err)) + ' first80=' + cleaned.slice(0, 80));
+          graphqlParseFailedLogged = true;
         }
         return null;
       }
@@ -500,20 +534,12 @@ async function scrapeMetaAds(competitor, options) {
         const resUrl = res.url();
         if (!resUrl.includes('graphql')) return;
         graphqlResponsesSeen += 1;
-        await printGraphqlDebugOnce("graphql-response", res);
-        if (!graphqlDebugPrinted) {
-          graphqlDebugPrinted = true;
-          try {
-            const headers = res.headers ? res.headers() : {};
-            const ct = headers['content-type'] || headers['Content-Type'] || '';
-            const raw = await res.text();
-            console.log('[graphql-debug] content-type:', ct);
-            console.log('[graphql-debug] first 200 chars:', String(raw || '').slice(0, 200));
-          } catch (e) {
-            console.log('[graphql-debug] failed to read response body:', String(e && e.message ? e.message : e));
-          }
-        }
-        const json = await parseGraphqlResponse(res);
+        const raw = await res.text().catch(() => '');
+        await printGraphqlDebugOnce("graphql-response", {
+          headers: () => (res && res.headers ? res.headers() : {}),
+          text: async () => raw
+        });
+        const json = parseGraphqlText(raw);
         if (!json) return;
         graphqlParsed += 1;
 
@@ -533,10 +559,7 @@ async function scrapeMetaAds(competitor, options) {
         if (!res) return;
         const resUrl = res.url();
         if (!resUrl.includes('graphql')) return;
-        const json = await parseGraphqlResponse(res);
-        if (!json) return;
-        graphqlParsed += 1;
-        await handleGraphqlJson(json);
+        // no-op: response body may be consumed in response handler
       } catch (err) {
         // ignore
       }
@@ -566,11 +589,16 @@ async function scrapeMetaAds(competitor, options) {
     await page.goto(finalUrlInput, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await waitForStableLoad(page);
 
-    if (!graphqlDebugPrinted) {
-      console.log("GRAPHQL_DEBUG_MARKER: no graphql responses captured yet");
-    }
-
     const cookieAccepted = await tryAcceptCookies(page);
+    await page.waitForTimeout(1500);
+    for (let i = 0; i < 3; i += 1) {
+      await withRetries(() => page.evaluate(() => {
+        window.scrollBy(0, 800);
+      }));
+      await page.waitForTimeout(800);
+    }
+    const earlyDomLinks = await extractAdLinksFromDom(page);
+    console.log(`GRAPHQL_DEBUG_MARKER: post-consent dom scan links=${earlyDomLinks.length}`);
     await waitForStableLoad(page);
 
     let loginWall = await detectLoginWall(page);
