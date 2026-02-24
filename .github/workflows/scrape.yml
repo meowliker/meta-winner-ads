@@ -1,9 +1,11 @@
 name: Daily Meta Ad Winners
 
 on:
+  workflow_dispatch:
   schedule:
-    - cron: '0 9 * * *'
-  workflow_dispatch: {}
+    - cron: "0 */6 * * *"
+  push:
+    branches: [ "main" ]
 
 jobs:
   scrape:
