@@ -1,35 +1,42 @@
- name: Daily Meta Ad Winners
-  on:
-    workflow_dispatch:
-    schedule:
-      - cron: "0 */6 * * *"
-    push:
-      branches: [ "main" ]
-  jobs:
-    scrape:
-      runs-on: ubuntu-latest
-      steps:
-        - name: Checkout
-          uses: actions/checkout@v4
-        - name: Setup Node
-          uses: actions/setup-node@v4
-          with:
-            node-version: '20'
-            cache: 'npm'
-        - name: Install deps
-          run: npm install
-        - name: Install Playwright
-          run: npx playwright install --with-deps chromium
-        - name: Run scraper
-          env:
-            WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
-            WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
-            COMPETITOR_URLS: ${{ secrets.COMPETITOR_URLS }}
-          run: npm run scrape
-        - name: Upload artifacts
-          if: always()
-          uses: actions/upload-artifact@v4
-          with:
-            name: scrape-artifacts
-            path: artifacts
-            if-no-files-found: ignore
+name: Daily Meta Ad Winners
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */6 * * *"
+  push:
+    branches: [ "main" ]
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Print commit SHA
+        run: |
+          echo "GITHUB_SHA=$GITHUB_SHA"
+          git rev-parse HEAD
+          git log -1 --oneline
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install deps
+        run: npm install
+      - name: Install Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Run scraper
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+          WEBHOOK_TOKEN: ${{ secrets.WEBHOOK_TOKEN }}
+          SEED_KEYWORDS: ${{ secrets.SEED_KEYWORDS }}
+          DISCOVERY_LIMIT: ${{ secrets.DISCOVERY_LIMIT }}
+          COUNTRIES: ${{ secrets.COUNTRIES }}
+          COMPETITOR_URLS: ${{ secrets.COMPETITOR_URLS }}
+        run: npm run scrape
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-artifacts
+          path: artifacts
+          if-no-files-found: ignore
