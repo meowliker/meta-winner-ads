@@ -1,3 +1,4 @@
+console.log("[version] scrapeMetaAds.js stamp: 2026-02-24-finalUrl-v1");
 const { chromium } = require('playwright');
 const fs = require('fs');
 const path = require('path');
@@ -479,6 +480,27 @@ async function scrapeMetaAds(competitor, options) {
       }
     });
 
+    console.log('[nav] using competitor.finalUrl: ' + finalUrlInput);
+    console.log('[nav] competitor.raw: ' + (rawInput || ''));
+    console.log('[nav] competitor.pageId: ' + (pageId || ''));
+    if ((finalUrlInput.includes('sort_data') || (!finalUrlInput.includes('view_all_page_id=') && !finalUrlInput.includes('search_term=')))) {
+      console.error('[nav] BAD FINAL URL (generic or missing view_all_page_id). Refusing to scrape.');
+      console.error('[nav] url=' + finalUrlInput);
+      return {
+        ads: [],
+        finalUrl: finalUrlInput,
+        cookieAccepted: false,
+        loginWall: false,
+        adLinksFound: 0,
+        graphqlAdsCollected: 0,
+        graphqlResponsesSeen: 0,
+        graphqlParsed: 0,
+        graphqlAdIds: 0,
+        domAdLinksFound: 0,
+        reason: 'bad_final_url'
+      };
+    }
+
     await page.goto(finalUrlInput, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await waitForStableLoad(page);
 
@@ -490,7 +512,7 @@ async function scrapeMetaAds(competitor, options) {
       const stillBlocked = await handleLoginWall(page, { pauseOnLoginWall, isLocal, headful });
       loginWall = stillBlocked;
       if (loginWall) {
-        console.log(`[scrape] Login wall detected. Skipping ${url}`);
+        console.log(`[scrape] Login wall detected. Skipping ${finalUrlInput}`);
         return {
           ads: [],
           finalUrl,
