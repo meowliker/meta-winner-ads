@@ -137,6 +137,104 @@ function pushAd(adMap, ad) {
   }
 }
 
+function sanitizeUrl(value) {
+  if (!value || typeof value !== 'string') return '';
+  let url = value.trim();
+  if (!url) return '';
+
+  try {
+    const parsed = new URL(url, 'https://www.facebook.com');
+    url = parsed.toString();
+  } catch (err) {
+    return '';
+  }
+
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.endsWith('facebook.com') && parsed.pathname.includes('/l.php')) {
+      const target = parsed.searchParams.get('u');
+      if (target) {
+        return decodeURIComponent(target);
+      }
+    }
+  } catch (err) {
+    return url;
+  }
+
+  return url;
+}
+
+function pickFirstUrl(values) {
+  for (const value of values) {
+    const sanitized = sanitizeUrl(value);
+    if (sanitized) return sanitized;
+  }
+  return '';
+}
+
+function extractLandingLink(node) {
+  if (!node || typeof node !== 'object') return '';
+
+  const direct = pickFirstUrl([
+    node.link_url,
+    node.website_url,
+    node.destination_url,
+    node.url,
+    node.final_url,
+    node.linkUrl,
+    node.websiteUrl,
+    node.destinationUrl,
+    node.finalUrl
+  ]);
+  if (direct) return direct;
+
+  const cta = node.call_to_action || node.callToAction || node.cta || null;
+  if (cta) {
+    const ctaLink = pickFirstUrl([
+      cta.link,
+      cta.url,
+      cta.value && cta.value.link,
+      cta.value && cta.value.url
+    ]);
+    if (ctaLink) return ctaLink;
+  }
+
+  if (Array.isArray(node.attachments)) {
+    for (const attachment of node.attachments) {
+      const attachmentLink = pickFirstUrl([
+        attachment.url,
+        attachment.link,
+        attachment.card_link,
+        attachment.cardLink
+      ]);
+      if (attachmentLink) return attachmentLink;
+    }
+  }
+
+  const cardLink = pickFirstUrl([node.card_link, node.cardLink]);
+  if (cardLink) return cardLink;
+
+  return '';
+}
+
+function extractCreativePreview(node) {
+  if (!node || typeof node !== 'object') return '';
+  return (
+    node.ad_snapshot_url ||
+    node.adSnapshotUrl ||
+    node.ad_creative_image_url ||
+    node.image_url ||
+    node.imageUrl ||
+    node.thumbnail_url ||
+    node.thumbnailUrl ||
+    ''
+  );
+}
+
 function extractAdsFromNode(node, adMap) {
   if (!node || typeof node !== 'object') return;
 
@@ -146,8 +244,8 @@ function extractAdsFromNode(node, adMap) {
       ad_archive_id: String(adId),
       started_running_on: node.started_running_on || node.startedRunningOn || node.start_time || null,
       primary_text: node.ad_creative_body || node.ad_creative_body_text || node.adCreativeBody || node.body || node.text || '',
-      creative_preview: node.ad_creative_image_url || node.image_url || node.imageUrl || node.thumbnail_url || node.thumbnailUrl || '',
-      landing_link: node.snapshot_url || node.snapshotUrl || node.link_url || node.linkUrl || node.website_url || ''
+      creative_preview: extractCreativePreview(node),
+      landing_link: extractLandingLink(node)
     };
     pushAd(adMap, ad);
   }
