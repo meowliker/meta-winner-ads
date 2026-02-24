@@ -6,6 +6,7 @@ const { scrapeMetaAds } = require('./scrapeMetaAds');
 const { scoreWinners } = require('./scoreWinners');
 const { postWebhook } = require('./postWebhook');
 const { discoverPages } = require('./discoverPages');
+const { extractLandingFromSnapshot, getSnapshotBrowser } = require('./snapshotLanding');
 
 function loadLocalEnv() {
   const dotenvPath = path.join(process.cwd(), '.env');
@@ -66,6 +67,14 @@ function toRow(ad, competitorUrl, category) {
     offerType: '',
     notes: 'Auto scraped by GitHub Actions'
   };
+}
+
+function domainFromUrl(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (err) {
+    return '';
+  }
 }
 
 async function main() {
@@ -183,6 +192,8 @@ async function main() {
 
   console.log(`Competitors: ${dedupedCompetitors.length}`);
 
+  let snapshotBrowser = null;
+
   for (let i = 0; i < dedupedCompetitors.length; i += 1) {
     const competitorUrl = dedupedCompetitors[i];
     const category = inferCategory(competitorUrl);
@@ -216,6 +227,29 @@ async function main() {
       const winners = scored.slice(0, 10);
       console.log(`[${i + 1}/${dedupedCompetitors.length}] Winners selected: ${winners.length}`);
 
+      for (const winner of winners) {
+        if (!winner.creativePreview && winner.adSnapshotUrl) {
+          winner.creativePreview = winner.adSnapshotUrl;
+        }
+
+        if (!winner.landingLink && winner.adSnapshotUrl) {
+          if (!snapshotBrowser) {
+            try {
+              snapshotBrowser = await getSnapshotBrowser();
+            } catch (err) {
+              console.error(`[${i + 1}/${dedupedCompetitors.length}] Snapshot browser launch failed: ${err.message}`);
+              break;
+            }
+          }
+          winner.landingLink = await extractLandingFromSnapshot(snapshotBrowser, winner.adSnapshotUrl);
+        }
+
+        const hasSnapshot = winner.adSnapshotUrl ? 'yes' : 'no';
+        const landingFound = winner.landingLink ? 'yes' : 'no';
+        const landingDomain = winner.landingLink ? domainFromUrl(winner.landingLink) : '';
+        console.log(`[winner] ${winner.adArchiveId || 'unknown'} snapshot:${hasSnapshot} landing:${landingFound} ${landingDomain}`);
+      }
+
       const rows = winners.map((ad) => toRow(ad, competitorUrl, category));
 
       for (let start = 0; start < rows.length; start += 20) {
@@ -234,6 +268,10 @@ async function main() {
     } catch (err) {
       console.error(`[${i + 1}/${dedupedCompetitors.length}] Failed: ${err.message}`);
     }
+  }
+
+  if (snapshotBrowser) {
+    await snapshotBrowser.close().catch(() => {});
   }
 }
 

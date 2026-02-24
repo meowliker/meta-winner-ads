@@ -235,6 +235,11 @@ function extractCreativePreview(node) {
   );
 }
 
+function extractSnapshotUrl(node) {
+  if (!node || typeof node !== 'object') return '';
+  return node.ad_snapshot_url || node.adSnapshotUrl || '';
+}
+
 function extractAdsFromNode(node, adMap) {
   if (!node || typeof node !== 'object') return;
 
@@ -245,7 +250,8 @@ function extractAdsFromNode(node, adMap) {
       started_running_on: node.started_running_on || node.startedRunningOn || node.start_time || null,
       primary_text: node.ad_creative_body || node.ad_creative_body_text || node.adCreativeBody || node.body || node.text || '',
       creative_preview: extractCreativePreview(node),
-      landing_link: extractLandingLink(node)
+      landing_link: extractLandingLink(node),
+      ad_snapshot_url: extractSnapshotUrl(node)
     };
     pushAd(adMap, ad);
   }
@@ -282,9 +288,11 @@ function normalizeAds(adMap) {
   const results = [];
   for (const ad of adMap.values()) {
     results.push({
+      adArchiveId: ad.ad_archive_id,
       adLibraryLink: ad.ad_archive_id
         ? `https://www.facebook.com/ads/library/?id=${ad.ad_archive_id}`
         : '',
+      adSnapshotUrl: ad.ad_snapshot_url || '',
       startedRunningOn: ad.started_running_on || null,
       primaryText: ad.primary_text || '',
       creativePreview: ad.creative_preview || '',
