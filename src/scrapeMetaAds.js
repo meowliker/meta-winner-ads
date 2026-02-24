@@ -1,8 +1,6 @@
 console.log("GRAPHQL_DEBUG_MARKER: scrapeMetaAds.js loaded");
 
 const { chromium } = require('playwright');
-const fs = require('fs');
-const path = require('path');
 
 // ─── Browser launch ───────────────────────────────────────────────────────────
 
@@ -34,7 +32,6 @@ async function tryAcceptCookies(page) {
   const selectors = ['[data-cookiebanner]', 'button[title*="Allow"]', '[aria-label*="cookie"]'];
 
   for (const frame of page.frames()) {
-    // Try CSS selectors
     for (const selector of selectors) {
       try {
         const loc = frame.locator(selector);
@@ -44,10 +41,9 @@ async function tryAcceptCookies(page) {
           await page.waitForTimeout(2500);
           return true;
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
     }
 
-    // Try by role with regex
     try {
       const btn = frame.getByRole('button', { name: /allow all|accept all|accept|agree/i });
       if (await btn.count() > 0) {
@@ -56,9 +52,8 @@ async function tryAcceptCookies(page) {
         await page.waitForTimeout(2500);
         return true;
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
 
-    // Try each label text
     for (const label of labels) {
       try {
         const loc = frame.locator('button:has-text("' + label + '")');
@@ -68,10 +63,9 @@ async function tryAcceptCookies(page) {
           await page.waitForTimeout(2500);
           return true;
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) {}
     }
 
-    // Try via DOM evaluation
     try {
       const clicked = await frame.evaluate(function(labelList) {
         var buttons = Array.from(document.querySelectorAll('button'));
@@ -91,7 +85,7 @@ async function tryAcceptCookies(page) {
         await page.waitForTimeout(2500);
         return true;
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   }
 
   console.log('[cookie] accepted: no');
@@ -121,15 +115,13 @@ function stripPrefix(raw) {
   return cleaned;
 }
 
-function parseGraphqlText(raw, logFailOnce) {
+function parseGraphqlText(raw, logFail) {
   var cleaned = stripPrefix(raw);
   if (cleaned[0] !== '{' && cleaned[0] !== '[') return null;
   try {
     return JSON.parse(cleaned);
   } catch (e) {
-    if (logFailOnce) {
-      console.log('GRAPHQL_DEBUG_MARKER: json_parse_failed err=' + e.message + ' first80=' + cleaned.slice(0, 80));
-    }
+    if (logFail) console.log('GRAPHQL_DEBUG_MARKER: json_parse_failed err=' + e.message + ' first80=' + cleaned.slice(0, 80));
     return null;
   }
 }
@@ -147,9 +139,7 @@ function sanitizeUrl(value) {
       if (target) return decodeURIComponent(target);
     }
     return url;
-  } catch (e) {
-    return '';
-  }
+  } catch (e) { return ''; }
 }
 
 function pickFirstUrl(values) {
@@ -193,7 +183,7 @@ function extractAdsFromNode(node, adMap) {
     if (!adMap.has(id)) {
       adMap.set(id, {
         ad_archive_id: id,
-        started_running_on: node.started_running_on || node.startedRunningOn || node.start_time || null,
+        started_running_on: node.started_running_on || node.startedRunningOn || node.start_time || node.startDate || null,
         creative_preview: extractCreativePreview(node),
         landing_link: extractLandingLink(node),
         ad_snapshot_url: node.ad_snapshot_url || node.adSnapshotUrl || ''
@@ -212,6 +202,10 @@ function extractAdsFromNode(node, adMap) {
     for (var i = 0; i < node.ads.length; i++) extractAdsFromNode(node.ads[i], adMap);
   }
 
+  if (Array.isArray(node.results)) {
+    for (var i = 0; i < node.results.length; i++) extractAdsFromNode(node.results[i], adMap);
+  }
+
   var keys = Object.keys(node);
   for (var k = 0; k < keys.length; k++) {
     var val = node[keys[k]];
@@ -221,7 +215,9 @@ function extractAdsFromNode(node, adMap) {
     }
     if (typeof val === 'string' && val.includes('ad_archive_id=')) {
       var m = val.match(/ad_archive_id=(\d+)/);
-      if (m && !adMap.has(m[1])) adMap.set(m[1], { ad_archive_id: m[1], started_running_on: null, creative_preview: '', landing_link: '', ad_snapshot_url: '' });
+      if (m && !adMap.has(m[1])) {
+        adMap.set(m[1], { ad_archive_id: m[1], started_running_on: null, creative_preview: '', landing_link: '', ad_snapshot_url: '' });
+      }
     }
   }
 }
@@ -233,7 +229,7 @@ function normalizeAds(adMap) {
     var runtimeDays = 0;
     if (startTs) {
       var ts = typeof startTs === 'number' ? startTs : Math.floor(new Date(startTs).getTime() / 1000);
-      runtimeDays = Math.floor((Date.now() / 1000 - ts) / 86400);
+      if (!isNaN(ts)) runtimeDays = Math.floor((Date.now() / 1000 - ts) / 86400);
     }
     results.push({
       adArchiveId: ad.ad_archive_id,
@@ -249,7 +245,7 @@ function normalizeAds(adMap) {
   return results;
 }
 
-// ─── DOM fallback ─────────────────────────────────────────────────────────────
+// ─── DOM ad extraction ────────────────────────────────────────────────────────
 
 async function extractAdLinksFromDom(page) {
   try {
@@ -264,9 +260,17 @@ async function extractAdLinksFromDom(page) {
     })));
     console.log('[dom] ad links found: ' + unique.length);
     return unique;
-  } catch (e) {
-    return [];
+  } catch (e) { return []; }
+}
+
+// Wait until real ad edges appear in GraphQL OR timeout
+async function waitForAdEdges(adMap, timeoutMs) {
+  var start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (adMap.size > 0) return true;
+    await new Promise(function(r) { setTimeout(r, 500); });
   }
+  return false;
 }
 
 // ─── Main scrape function ─────────────────────────────────────────────────────
@@ -275,11 +279,8 @@ async function scrapeMetaAds(competitor, options) {
   console.log("GRAPHQL_DEBUG_MARKER: competitor start");
   var headful = options.headful || false;
   var maxAds = options.maxAds || 30;
-  var isLocal = options.isLocal || false;
-  var competitorIndex = options.competitorIndex || 1;
   var finalUrlInput = competitor.finalUrl || '';
-  var rawInput = competitor.raw || '';
-  var pageId = competitor.pageId || '';
+  var competitorIndex = options.competitorIndex || 1;
 
   console.log('[competitor] finalUrl: ' + finalUrlInput);
 
@@ -299,7 +300,7 @@ async function scrapeMetaAds(competitor, options) {
   var parseFailLogged = false;
   var firstResponseLogged = false;
 
-  // ✅ Attach response handler BEFORE navigation
+  // ✅ Attach BEFORE navigation
   page.on('response', async function(res) {
     try {
       var url = res.url();
@@ -318,8 +319,20 @@ async function scrapeMetaAds(competitor, options) {
       var json = parseGraphqlText(raw, !parseFailLogged);
       if (!json) { parseFailLogged = true; return; }
       graphqlParsed++;
+
+      // Log structure of first parsed response to help debug paths
+      if (graphqlParsed === 1) {
+        var topKeys = Object.keys(json).join(',');
+        var dataKeys = json.data ? Object.keys(json.data).join(',') : 'none';
+        console.log('GRAPHQL_DEBUG_MARKER: first-parsed topKeys=' + topKeys + ' dataKeys=' + dataKeys);
+        if (json.data && json.data.ad_library_main) {
+          var mainKeys = Object.keys(json.data.ad_library_main).join(',');
+          console.log('GRAPHQL_DEBUG_MARKER: ad_library_main keys=' + mainKeys);
+        }
+      }
+
       extractAdsFromNode(json, adMap);
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   });
 
   page.on('framenavigated', function(frame) {
@@ -333,45 +346,53 @@ async function scrapeMetaAds(competitor, options) {
     console.error('[nav] goto failed: ' + e.message);
   }
 
-  await page.waitForTimeout(3000);
+  // Wait for page to settle including redirect
+  await page.waitForTimeout(4000);
 
   // Accept cookies
   var cookieAccepted = await tryAcceptCookies(page);
 
-  // Wait for ads container
-  try {
-    await page.waitForSelector('[class*="x1dr75xp"]', { timeout: 15000 });
-  } catch (e) { /* ignore */ }
+  // After cookie acceptance wait for Facebook to load the actual ads
+  console.log('[scrape] Waiting 12s for ad edges to load after cookie acceptance...');
+  await page.waitForTimeout(12000);
 
-  await page.waitForTimeout(8000);
-
-  // Scroll to trigger GraphQL ad edge requests
-  for (var i = 0; i < 10; i++) {
-    try { await page.evaluate(function() { window.scrollBy(0, 800); }); } catch (e) { /* ignore */ }
-    await page.waitForTimeout(1500);
+  // Slow scroll to trigger ad edge GraphQL requests
+  console.log('[scrape] Starting scroll phase...');
+  for (var i = 0; i < 12; i++) {
+    try { await page.evaluate(function() { window.scrollBy(0, 600); }); } catch (e) {}
+    await page.waitForTimeout(2000);
+    // Stop scrolling early if we already have ads
+    if (adMap.size > 0 && i > 3) {
+      console.log('[scrape] Got ' + adMap.size + ' ads — stopping scroll early');
+      break;
+    }
   }
 
   // Detect login wall
   var loginWall = await detectLoginWall(page);
   if (loginWall) {
-    try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) { /* ignore */ }
+    try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) {}
     console.log('[scrape] Login wall detected');
   }
 
-  // If still no ads, reload and retry
+  // If still no ads, reload once and retry
   if (adMap.size === 0 && !loginWall) {
     console.log('[scrape] 0 ads after scroll — reloading and retrying');
     try {
       await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(5000);
-      for (var i = 0; i < 6; i++) {
-        try { await page.evaluate(function() { window.scrollBy(0, 1200); }); } catch (e) { /* ignore */ }
-        await page.waitForTimeout(1200);
+      await page.waitForTimeout(8000);
+      var cookieAccepted2 = await tryAcceptCookies(page);
+      if (cookieAccepted2) cookieAccepted = true;
+      await page.waitForTimeout(8000);
+      for (var i = 0; i < 8; i++) {
+        try { await page.evaluate(function() { window.scrollBy(0, 800); }); } catch (e) {}
+        await page.waitForTimeout(2000);
+        if (adMap.size > 0) break;
       }
-    } catch (e) { /* ignore */ }
+    } catch (e) {}
   }
 
-  // DOM fallback
+  // DOM fallback — grab any visible ad links
   var domLinks = await extractAdLinksFromDom(page);
   domLinks.forEach(function(href) {
     var m = href.match(/ad_archive_id=(\d+)/) || href.match(/\/ads\/library\/\?id=(\d+)/);
@@ -384,7 +405,7 @@ async function scrapeMetaAds(competitor, options) {
 
   await browser.close();
 
-  // Normalize and filter
+  // Normalize
   var allAds = normalizeAds(adMap);
   var adsWithDates = allAds.filter(function(a) { return a.runtimeDays > 0; });
   var ads = adsWithDates.length > 0
