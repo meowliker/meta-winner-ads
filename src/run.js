@@ -192,18 +192,31 @@ async function main() {
       continue;
     }
 
-    competitorResolved.push(built.finalUrl);
+    competitorResolved.push({
+      raw: input,
+      finalUrl: built.finalUrl,
+      pageId: built.pageId || ''
+    });
   }
 
   if (printUrlsOnly) {
-    for (const url of competitorResolved) {
-      console.log(`[print-urls] ${url}`);
+    for (const item of competitorResolved) {
+      console.log(`[print-urls] ${item.finalUrl}`);
     }
     return;
   }
 
-  const allCompetitors = [...competitorResolved, ...discoveredUrls];
-  const dedupedCompetitors = Array.from(new Set(allCompetitors));
+  const allCompetitors = [
+    ...competitorResolved,
+    ...discoveredUrls.map((url) => ({ raw: url, finalUrl: url, pageId: '' }))
+  ];
+  const dedupedCompetitors = [];
+  const seenUrls = new Set();
+  for (const item of allCompetitors) {
+    if (!item.finalUrl || seenUrls.has(item.finalUrl)) continue;
+    seenUrls.add(item.finalUrl);
+    dedupedCompetitors.push(item);
+  }
 
   cache = {
     updatedAt: new Date().toISOString(),
@@ -216,17 +229,19 @@ async function main() {
   let snapshotBrowser = null;
 
   for (let i = 0; i < dedupedCompetitors.length; i += 1) {
-    const competitorUrl = dedupedCompetitors[i];
+    const competitor = dedupedCompetitors[i];
+    const competitorUrl = competitor.finalUrl;
     const category = inferCategory(competitorUrl);
 
     console.log(`[${i + 1}/${dedupedCompetitors.length}] Scraping ${competitorUrl}`);
 
     try {
-      const result = await scrapeMetaAds(competitorUrl, {
+      const result = await scrapeMetaAds(competitor, {
         headful: runHeadful,
         maxAds: 30,
         isLocal,
-        pauseOnLoginWall
+        pauseOnLoginWall,
+        competitorIndex: i + 1
       });
       const ads = Array.isArray(result) ? result : result.ads;
       const finalUrl = result && result.finalUrl ? result.finalUrl : competitorUrl;

@@ -384,13 +384,21 @@ async function waitForAdSignals(page) {
   }
 }
 
-async function scrapeMetaAds(url, options) {
+async function scrapeMetaAds(competitor, options) {
   const { headful, maxAds = 30, isLocal, pauseOnLoginWall, competitorIndex } = options;
-  if (shouldSkipCompetitorUrl(url)) {
-    console.error(`[competitor] BAD URL: ${url} (missing view_all_page_id or search_term)`);
+  const finalUrlInput = competitor && competitor.finalUrl ? competitor.finalUrl : '';
+  const rawInput = competitor && competitor.raw ? competitor.raw : '';
+  const pageId = competitor && competitor.pageId ? competitor.pageId : '';
+
+  console.log('[competitor] raw: ' + (rawInput || 'n/a'));
+  console.log('[competitor] finalUrl: ' + (finalUrlInput || 'n/a'));
+  console.log('[competitor] pageId: ' + (pageId || 'n/a'));
+
+  if (!finalUrlInput || shouldSkipCompetitorUrl(finalUrlInput)) {
+    console.error('[competitor] BAD URL: ' + (rawInput || finalUrlInput) + ' (missing view_all_page_id or search_term)');
     return {
       ads: [],
-      finalUrl: url,
+      finalUrl: finalUrlInput,
       cookieAccepted: false,
       loginWall: false,
       adLinksFound: 0,
@@ -408,7 +416,7 @@ async function scrapeMetaAds(url, options) {
   const page = await context.newPage();
 
   try {
-    let finalUrl = url;
+    let finalUrl = finalUrlInput;
     const graphqlPayloads = [];
     const adMap = new Map();
     let graphqlResponsesSeen = 0;
@@ -471,7 +479,7 @@ async function scrapeMetaAds(url, options) {
       }
     });
 
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await page.goto(finalUrlInput, { waitUntil: 'domcontentloaded', timeout: 60000 });
     await waitForStableLoad(page);
 
     const cookieAccepted = await tryAcceptCookies(page);
@@ -534,7 +542,7 @@ async function scrapeMetaAds(url, options) {
     if (graphqlAdsCollected === 0 && isLocal) {
       const debugDir = path.join(process.cwd(), 'debug');
       fs.mkdirSync(debugDir, { recursive: true });
-      const pageId = extractPageId(finalUrl || url);
+      const pageId = extractPageId(finalUrl || finalUrlInput);
       const networkPath = path.join(debugDir, `${pageId}-network.json`);
       const screenshotPath = path.join(debugDir, `${pageId}.png`);
 
