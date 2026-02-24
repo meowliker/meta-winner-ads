@@ -1,4 +1,4 @@
-console.log("GRAPHQL_DEBUG_MARKER: scrapeMetaAds.js loaded");
+ console.log("GRAPHQL_DEBUG_MARKER: scrapeMetaAds.js loaded");
   console.log("[version] scrapeMetaAds.js stamp: 2026-02-24-finalUrl-v1");
   const { chromium } = require('playwright');
   const fs = require('fs');
@@ -517,14 +517,13 @@ console.log("GRAPHQL_DEBUG_MARKER: scrapeMetaAds.js loaded");
         }
       }
 
-
       page.on('framenavigated', (frame) => {
         if (frame === page.mainFrame()) {
           finalUrl = frame.url();
         }
       });
 
-          async function handleGraphqlJson(json) {
+      async function handleGraphqlJson(json) {
         if (!json) return;
         const tempMap = new Map();
         extractAdsFromNode(json, tempMap);
