@@ -5,7 +5,16 @@ const { chromium } = require('playwright');
 // ─── Browser launch ───────────────────────────────────────────────────────────
 
 async function launchBrowser(headful) {
-  const args = ['--disable-dev-shm-usage', '--no-sandbox', '--disable-blink-features=AutomationControlled'];
+  const args = [
+    '--disable-dev-shm-usage',
+    '--no-sandbox',
+    '--disable-blink-features=AutomationControlled',
+    '--disable-web-security',
+    '--disable-features=IsolateOrigins,site-per-process',
+    '--flag-switches-begin',
+    '--disable-site-isolation-trials',
+    '--flag-switches-end'
+  ];
   try {
     const browser = await chromium.launch({ headless: !headful, channel: 'chrome', args });
     console.log('[playwright] Launched system Chrome');
@@ -16,13 +25,41 @@ async function launchBrowser(headful) {
   }
 }
 
-function createContext(browser) {
-  return browser.newContext({
+async function createContext(browser) {
+  const context = await browser.newContext({
     locale: 'en-US',
     timezoneId: 'America/New_York',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    viewport: { width: 1280, height: 720 }
+    viewport: { width: 1280, height: 900 },
+    extraHTTPHeaders: {
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+      'sec-ch-ua': '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+      'sec-ch-ua-mobile': '?0',
+      'sec-ch-ua-platform': '"Windows"'
+    }
   });
+
+  // Mask automation signals via JS
+  await context.addInitScript(function() {
+    Object.defineProperty(navigator, 'webdriver', { get: function() { return false; } });
+    Object.defineProperty(navigator, 'plugins', { get: function() { return [1, 2, 3, 4, 5]; } });
+    Object.defineProperty(navigator, 'languages', { get: function() { return ['en-US', 'en']; } });
+    window.chrome = { runtime: {} };
+  });
+
+  return context;
+}
+
+// ─── Human-like mouse movement ────────────────────────────────────────────────
+
+async function humanMove(page) {
+  try {
+    var x = 200 + Math.floor(Math.random() * 600);
+    var y = 200 + Math.floor(Math.random() * 400);
+    await page.mouse.move(x, y, { steps: 10 });
+    await page.waitForTimeout(300 + Math.floor(Math.random() * 400));
+  } catch (e) {}
 }
 
 // ─── Cookie consent ───────────────────────────────────────────────────────────
@@ -101,9 +138,7 @@ async function detectLoginWall(page) {
     });
     var lower = String(text).toLowerCase();
     return lower.includes('log in') && lower.includes('facebook');
-  } catch (e) {
-    return false;
-  }
+  } catch (e) { return false; }
 }
 
 // ─── GraphQL parsing ──────────────────────────────────────────────────────────
@@ -197,11 +232,9 @@ function extractAdsFromNode(node, adMap) {
       if (node.edges[i] && node.edges[i].node) extractAdsFromNode(node.edges[i].node, adMap);
     }
   }
-
   if (Array.isArray(node.ads)) {
     for (var i = 0; i < node.ads.length; i++) extractAdsFromNode(node.ads[i], adMap);
   }
-
   if (Array.isArray(node.results)) {
     for (var i = 0; i < node.results.length; i++) extractAdsFromNode(node.results[i], adMap);
   }
@@ -245,7 +278,7 @@ function normalizeAds(adMap) {
   return results;
 }
 
-// ─── DOM ad extraction ────────────────────────────────────────────────────────
+// ─── DOM fallback ─────────────────────────────────────────────────────────────
 
 async function extractAdLinksFromDom(page) {
   try {
@@ -263,14 +296,20 @@ async function extractAdLinksFromDom(page) {
   } catch (e) { return []; }
 }
 
-// Wait until real ad edges appear in GraphQL OR timeout
-async function waitForAdEdges(adMap, timeoutMs) {
+// ─── Wait for page redirect to settle ────────────────────────────────────────
+
+async function waitForRedirectToSettle(page, timeoutMs) {
   var start = Date.now();
+  var lastUrl = page.url();
   while (Date.now() - start < timeoutMs) {
-    if (adMap.size > 0) return true;
-    await new Promise(function(r) { setTimeout(r, 500); });
+    await page.waitForTimeout(1000);
+    var currentUrl = page.url();
+    if (currentUrl.includes('sort_data') && currentUrl === lastUrl) {
+      console.log('[nav] Redirect settled at: ' + currentUrl.slice(0, 80) + '...');
+      return;
+    }
+    lastUrl = currentUrl;
   }
-  return false;
 }
 
 // ─── Main scrape function ─────────────────────────────────────────────────────
@@ -299,6 +338,7 @@ async function scrapeMetaAds(competitor, options) {
   var graphqlParsed = 0;
   var parseFailLogged = false;
   var firstResponseLogged = false;
+  var uniqueDataKeys = new Set();
 
   // ✅ Attach BEFORE navigation
   page.on('response', async function(res) {
@@ -320,14 +360,12 @@ async function scrapeMetaAds(competitor, options) {
       if (!json) { parseFailLogged = true; return; }
       graphqlParsed++;
 
-      // Log structure of first parsed response to help debug paths
-      if (graphqlParsed === 1) {
-        var topKeys = Object.keys(json).join(',');
-        var dataKeys = json.data ? Object.keys(json.data).join(',') : 'none';
-        console.log('GRAPHQL_DEBUG_MARKER: first-parsed topKeys=' + topKeys + ' dataKeys=' + dataKeys);
-        if (json.data && json.data.ad_library_main) {
-          var mainKeys = Object.keys(json.data.ad_library_main).join(',');
-          console.log('GRAPHQL_DEBUG_MARKER: ad_library_main keys=' + mainKeys);
+      // Log every unique ad_library_main key combination so we can see when ad edges appear
+      if (json.data && json.data.ad_library_main) {
+        var keyStr = Object.keys(json.data.ad_library_main).sort().join(',');
+        if (!uniqueDataKeys.has(keyStr)) {
+          uniqueDataKeys.add(keyStr);
+          console.log('GRAPHQL_DEBUG_MARKER: new ad_library_main shape keys=' + keyStr);
         }
       }
 
@@ -339,60 +377,66 @@ async function scrapeMetaAds(competitor, options) {
     if (frame === page.mainFrame()) finalUrl = frame.url();
   });
 
-  // Navigate
+  // Step 1: Navigate
   try {
     await page.goto(finalUrlInput, { waitUntil: 'domcontentloaded', timeout: 60000 });
   } catch (e) {
     console.error('[nav] goto failed: ' + e.message);
   }
 
-  // Wait for page to settle including redirect
-  await page.waitForTimeout(4000);
-
-  // Accept cookies
+  // Step 2: Accept cookies immediately before anything else
+  await page.waitForTimeout(2000);
   var cookieAccepted = await tryAcceptCookies(page);
 
-  // After cookie acceptance wait for Facebook to load the actual ads
-  console.log('[scrape] Waiting 12s for ad edges to load after cookie acceptance...');
-  await page.waitForTimeout(12000);
+  // Step 3: Wait for the redirect to sort_data to fully settle
+  console.log('[scrape] Waiting for page redirect to settle...');
+  await waitForRedirectToSettle(page, 15000);
 
-  // Slow scroll to trigger ad edge GraphQL requests
-  console.log('[scrape] Starting scroll phase...');
-  for (var i = 0; i < 12; i++) {
-    try { await page.evaluate(function() { window.scrollBy(0, 600); }); } catch (e) {}
+  // Step 4: Do a human-like mouse move
+  await humanMove(page);
+  await page.waitForTimeout(3000);
+
+  // Step 5: Try cookies again in case the banner reappeared after redirect
+  if (!cookieAccepted) {
+    cookieAccepted = await tryAcceptCookies(page);
+    if (cookieAccepted) await page.waitForTimeout(5000);
+  }
+
+  // Step 6: Wait for ad edges GraphQL — check every 2s for up to 30s
+  console.log('[scrape] Waiting for ad edges GraphQL...');
+  var waited = 0;
+  while (adMap.size === 0 && waited < 30000) {
     await page.waitForTimeout(2000);
-    // Stop scrolling early if we already have ads
-    if (adMap.size > 0 && i > 3) {
-      console.log('[scrape] Got ' + adMap.size + ' ads — stopping scroll early');
-      break;
+    waited += 2000;
+    // Human scroll every 4s
+    if (waited % 4000 === 0) {
+      try {
+        await page.evaluate(function() { window.scrollBy(0, 400); });
+        await humanMove(page);
+      } catch (e) {}
     }
   }
 
-  // Detect login wall
+  console.log('[scrape] After wait: ids=' + adMap.size + ' waited=' + waited + 'ms');
+
+  // Step 7: If still nothing, continue scrolling deeper
+  if (adMap.size === 0) {
+    console.log('[scrape] Still 0 — doing deep scroll');
+    for (var i = 0; i < 10; i++) {
+      try { await page.evaluate(function() { window.scrollBy(0, 800); }); } catch (e) {}
+      await page.waitForTimeout(2000);
+      if (adMap.size > 0) break;
+    }
+  }
+
+  // Step 8: Detect login wall
   var loginWall = await detectLoginWall(page);
   if (loginWall) {
     try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) {}
     console.log('[scrape] Login wall detected');
   }
 
-  // If still no ads, reload once and retry
-  if (adMap.size === 0 && !loginWall) {
-    console.log('[scrape] 0 ads after scroll — reloading and retrying');
-    try {
-      await page.reload({ waitUntil: 'domcontentloaded' });
-      await page.waitForTimeout(8000);
-      var cookieAccepted2 = await tryAcceptCookies(page);
-      if (cookieAccepted2) cookieAccepted = true;
-      await page.waitForTimeout(8000);
-      for (var i = 0; i < 8; i++) {
-        try { await page.evaluate(function() { window.scrollBy(0, 800); }); } catch (e) {}
-        await page.waitForTimeout(2000);
-        if (adMap.size > 0) break;
-      }
-    } catch (e) {}
-  }
-
-  // DOM fallback — grab any visible ad links
+  // Step 9: DOM fallback
   var domLinks = await extractAdLinksFromDom(page);
   domLinks.forEach(function(href) {
     var m = href.match(/ad_archive_id=(\d+)/) || href.match(/\/ads\/library\/\?id=(\d+)/);
@@ -405,7 +449,7 @@ async function scrapeMetaAds(competitor, options) {
 
   await browser.close();
 
-  // Normalize
+  // Normalize and filter to 30+ day winners
   var allAds = normalizeAds(adMap);
   var adsWithDates = allAds.filter(function(a) { return a.runtimeDays > 0; });
   var ads = adsWithDates.length > 0
