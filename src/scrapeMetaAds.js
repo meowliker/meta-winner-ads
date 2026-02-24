@@ -1,38 +1,31 @@
 console.log("GRAPHQL_DEBUG_MARKER: scrapeMetaAds.js loaded");
 
-// Use playwright-extra with stealth plugin to bypass Facebook bot detection
-let chromium;
+var chromium;
 try {
-  const { chromium: chromiumExtra } = require('playwright-extra');
-  const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-  chromiumExtra.use(StealthPlugin());
-  chromium = chromiumExtra;
-  console.log('[stealth] playwright-extra + stealth plugin loaded');
+  var playwrightExtra = require('playwright-extra');
+  var StealthPlugin = require('puppeteer-extra-plugin-stealth');
+  playwrightExtra.chromium.use(StealthPlugin());
+  chromium = playwrightExtra.chromium;
+  console.log('[stealth] loaded successfully');
 } catch (e) {
-  console.log('[stealth] playwright-extra not available, falling back to plain playwright: ' + e.message);
+  console.log('[stealth] not available, using plain playwright: ' + e.message);
   chromium = require('playwright').chromium;
 }
 
-// ─── Browser ──────────────────────────────────────────────────────────────────
-
 async function launchBrowser(headful) {
-  const args = [
-    '--no-sandbox',
-    '--disable-dev-shm-usage',
-    '--disable-blink-features=AutomationControlled'
-  ];
+  var args = ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'];
   try {
-    const browser = await chromium.launch({ headless: !headful, channel: 'chrome', args });
-    console.log('[playwright] Launched system Chrome');
-    return browser;
+    var b = await chromium.launch({ headless: !headful, channel: 'chrome', args: args });
+    console.log('[browser] launched system Chrome');
+    return b;
   } catch (e) {
-    console.log('[playwright] Falling back to bundled Chromium');
-    return chromium.launch({ headless: !headful, args });
+    console.log('[browser] falling back to bundled Chromium');
+    return chromium.launch({ headless: !headful, args: args });
   }
 }
 
 async function createContext(browser) {
-  const context = await browser.newContext({
+  var ctx = await browser.newContext({
     locale: 'en-US',
     timezoneId: 'America/New_York',
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -44,47 +37,46 @@ async function createContext(browser) {
       'sec-ch-ua-platform': '"Windows"'
     }
   });
-  await context.addInitScript(function() {
+  await ctx.addInitScript(function() {
     Object.defineProperty(navigator, 'webdriver', { get: function() { return undefined; } });
     Object.defineProperty(navigator, 'plugins', { get: function() { return [1, 2, 3, 4, 5]; } });
     Object.defineProperty(navigator, 'languages', { get: function() { return ['en-US', 'en']; } });
     window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {} };
   });
-  return context;
+  return ctx;
 }
 
-// ─── Cookie consent ───────────────────────────────────────────────────────────
-
 async function tryAcceptCookies(page) {
-  const labels = ['Allow all cookies', 'Allow all', 'Accept all', 'Accept', 'Agree', 'Only allow essential cookies'];
-  for (const frame of page.frames()) {
+  var labels = ['Allow all cookies', 'Allow all', 'Accept all', 'Accept', 'Agree', 'Only allow essential cookies'];
+  for (var fi = 0; fi < page.frames().length; fi++) {
+    var frame = page.frames()[fi];
     try {
-      const btn = frame.getByRole('button', { name: /allow all|accept all|accept|agree/i });
+      var btn = frame.getByRole('button', { name: /allow all|accept all|accept|agree/i });
       if (await btn.count() > 0) {
         await btn.first().click({ timeout: 2000 });
-        console.log('[cookie] accepted: yes (role button)');
+        console.log('[cookie] accepted: yes (role)');
         await page.waitForTimeout(3000);
         return true;
       }
     } catch (e) {}
-    for (const label of labels) {
+    for (var li = 0; li < labels.length; li++) {
       try {
-        const loc = frame.locator('button:has-text("' + label + '")');
+        var loc = frame.locator('button:has-text("' + labels[li] + '")');
         if (await loc.count() > 0) {
           await loc.first().click({ timeout: 2000 });
-          console.log('[cookie] accepted: yes (' + label + ')');
+          console.log('[cookie] accepted: yes (' + labels[li] + ')');
           await page.waitForTimeout(3000);
           return true;
         }
       } catch (e) {}
     }
     try {
-      const clicked = await frame.evaluate(function(labelList) {
+      var clicked = await frame.evaluate(function(lbls) {
         var btns = Array.from(document.querySelectorAll('button'));
         for (var i = 0; i < btns.length; i++) {
           var t = (btns[i].innerText || '').trim().toLowerCase();
-          for (var j = 0; j < labelList.length; j++) {
-            if (t.includes(labelList[j].toLowerCase())) { btns[i].click(); return true; }
+          for (var j = 0; j < lbls.length; j++) {
+            if (t.includes(lbls[j].toLowerCase())) { btns[i].click(); return true; }
           }
         }
         return false;
@@ -100,8 +92,6 @@ async function tryAcceptCookies(page) {
   return false;
 }
 
-// ─── GraphQL parsing ──────────────────────────────────────────────────────────
-
 function stripPrefix(raw) {
   var s = String(raw || '').trim();
   if (s.startsWith('for (;;);')) s = s.slice(9).trim();
@@ -112,14 +102,11 @@ function stripPrefix(raw) {
 function parseJson(raw, logFail) {
   var s = stripPrefix(raw);
   if (!s || (s[0] !== '{' && s[0] !== '[')) return null;
-  try { return JSON.parse(s); }
-  catch (e) {
+  try { return JSON.parse(s); } catch (e) {
     if (logFail) console.log('GRAPHQL_DEBUG_MARKER: parse_failed first80=' + s.slice(0, 80));
     return null;
   }
 }
-
-// ─── Ad extraction ────────────────────────────────────────────────────────────
 
 function sanitizeUrl(v) {
   if (!v || typeof v !== 'string' || !v.trim().startsWith('http')) return '';
@@ -208,8 +195,6 @@ function normalize(adMap) {
   return out;
 }
 
-// ─── DOM fallback ─────────────────────────────────────────────────────────────
-
 async function domFallback(page, adMap) {
   try {
     var hrefs = await page.evaluate(function() {
@@ -217,20 +202,15 @@ async function domFallback(page, adMap) {
         .map(function(a) { return a.getAttribute('href') || ''; })
         .filter(function(h) { return h.includes('ad_archive_id') || (h.includes('/ads/library/') && h.includes('id=')); });
     });
-    var seen = new Set(Array.from(adMap.keys()));
     hrefs.forEach(function(h) {
-      var m = h.match(/ad_archive_id=(\d+)/) || h.match(/\/ads\/library\/\?id=(\d+)/);
-      if (m && !seen.has(m[1])) {
-        adMap.set(m[1], { id: m[1], start: null, creative: '', landing: '', snapshot: 'https://www.facebook.com/ads/library/?id=' + m[1] });
-        seen.add(m[1]);
-      }
+      var full = h.startsWith('http') ? h : 'https://www.facebook.com' + h;
+      var m = full.match(/ad_archive_id=(\d+)/) || full.match(/\/ads\/library\/\?id=(\d+)/);
+      if (m && !adMap.has(m[1])) adMap.set(m[1], { id: m[1], start: null, creative: '', landing: '', snapshot: 'https://www.facebook.com/ads/library/?id=' + m[1] });
     });
     console.log('[dom] ad links found: ' + hrefs.length);
     return hrefs.length;
   } catch (e) { return 0; }
 }
-
-// ─── Login wall ───────────────────────────────────────────────────────────────
 
 async function isLoginWall(page) {
   try {
@@ -239,8 +219,6 @@ async function isLoginWall(page) {
     return l.includes('log in') && l.includes('facebook');
   } catch (e) { return false; }
 }
-
-// ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function scrapeMetaAds(competitor, options) {
   console.log("GRAPHQL_DEBUG_MARKER: competitor start");
@@ -258,13 +236,11 @@ async function scrapeMetaAds(competitor, options) {
   var browser = await launchBrowser(headful);
   var context = await createContext(browser);
   var page = await context.newPage();
-
   var finalUrl = finalUrlInput;
   var adMap = new Map();
   var seen = 0, parsed = 0, failLogged = false, firstLogged = false;
   var shapes = new Set();
 
-  // ✅ Response handler BEFORE navigation
   page.on('response', async function(res) {
     try {
       if (!res.url().includes('graphql')) return;
@@ -280,7 +256,7 @@ async function scrapeMetaAds(competitor, options) {
       parsed++;
       if (json.data && json.data.ad_library_main) {
         var shape = Object.keys(json.data.ad_library_main).sort().join(',');
-        if (!shapes.has(shape)) { shapes.add(shape); console.log('GRAPHQL_DEBUG_MARKER: ad_library_main shape=' + shape); }
+        if (!shapes.has(shape)) { shapes.add(shape); console.log('GRAPHQL_DEBUG_MARKER: shape=' + shape); }
       }
       extractAds(json, adMap);
     } catch (e) {}
@@ -288,32 +264,23 @@ async function scrapeMetaAds(competitor, options) {
 
   page.on('framenavigated', function(f) { if (f === page.mainFrame()) finalUrl = f.url(); });
 
-  // Navigate
   try { await page.goto(finalUrlInput, { waitUntil: 'domcontentloaded', timeout: 60000 }); }
   catch (e) { console.error('[nav] failed: ' + e.message); }
 
-  // Accept cookies right away
   await page.waitForTimeout(2000);
   var cookieAccepted = await tryAcceptCookies(page);
-
-  // Wait for redirect to settle
   await page.waitForTimeout(6000);
-  console.log('[nav] settled url: ' + page.url().slice(0, 100));
 
-  // Try cookies again after redirect
   if (!cookieAccepted) {
     cookieAccepted = await tryAcceptCookies(page);
-    if (cookieAccepted) await page.waitForTimeout(5000);
+    if (cookieAccepted) await page.waitForTimeout(4000);
   }
 
-  // Poll for ads while scrolling — up to 60 seconds
-  console.log('[scrape] Polling for ad edges...');
+  console.log('[scrape] Polling for ads...');
   var elapsed = 0;
-  var scrollStep = 0;
   while (elapsed < 60000) {
     await page.waitForTimeout(2000);
     elapsed += 2000;
-    scrollStep++;
     try { await page.evaluate(function() { window.scrollBy(0, 500); }); } catch (e) {}
     if (adMap.size > 0 && elapsed > 6000) {
       console.log('[scrape] Got ' + adMap.size + ' ads at ' + elapsed + 'ms');
@@ -321,9 +288,8 @@ async function scrapeMetaAds(competitor, options) {
     }
   }
 
-  // If still nothing after 60s, try a page reload once
   if (adMap.size === 0) {
-    console.log('[scrape] 0 ads — reloading once');
+    console.log('[scrape] 0 ads — reloading');
     try {
       await page.reload({ waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(5000);
@@ -337,9 +303,7 @@ async function scrapeMetaAds(competitor, options) {
   }
 
   var loginWall = await isLoginWall(page);
-  if (loginWall) {
-    try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) {}
-  }
+  if (loginWall) { try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) {} }
 
   var domLinks = await domFallback(page, adMap);
 
