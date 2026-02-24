@@ -443,6 +443,7 @@ async function scrapeMetaAds(competitor, options) {
     }
 
     let graphqlDebugLogged = false;
+    let graphqlFirstResponseLogged = false;
 
     async function parseGraphqlResponse(res) {
       const ct = String(res.headers()['content-type'] || '').toLowerCase();
@@ -451,6 +452,12 @@ async function scrapeMetaAds(competitor, options) {
 
       const raw = await res.text().catch(() => '');
       if (!raw) return null;
+
+      if (!graphqlFirstResponseLogged && graphqlResponsesSeen === 1) {
+        console.log('[graphql-debug] content-type:', res.headers()['content-type']);
+        console.log('[graphql-debug] first 200 chars:', raw.slice(0, 200));
+        graphqlFirstResponseLogged = true;
+      }
 
       let cleaned = raw.trim();
       if (cleaned.startsWith('for (;;);')) {
