@@ -32,4 +32,4 @@ jobs:
           DISCOVERY_LIMIT: ${{ secrets.DISCOVERY_LIMIT }}
           COUNTRIES: ${{ secrets.COUNTRIES }}
           COMPETITOR_URLS: ${{ secrets.COMPETITOR_URLS }}
-        run: npm run scrape
+        run: npm run scrape:local
