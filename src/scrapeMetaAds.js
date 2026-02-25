@@ -8,8 +8,36 @@ try {
   chromium = playwrightExtra.chromium;
   console.log('[stealth] loaded successfully');
 } catch (e) {
-  console.log('[stealth] not available, using plain playwright: ' + e.message);
+  console.log('[stealth] not available: ' + e.message);
   chromium = require('playwright').chromium;
+}
+
+function loadCookies() {
+  var raw = process.env.FB_COOKIES || '';
+  if (!raw) { console.log('[cookies] FB_COOKIES not set'); return []; }
+  try {
+    var parsed = JSON.parse(raw);
+    var out = [];
+    for (var i = 0; i < parsed.length; i++) {
+      var c = parsed[i];
+      var cookie = {
+        name: c.name,
+        value: c.value,
+        domain: c.domain || '.facebook.com',
+        path: c.path || '/',
+        secure: c.secure || false,
+        httpOnly: c.httpOnly || false,
+        sameSite: 'None'
+      };
+      if (c.expirationDate) cookie.expires = Math.floor(c.expirationDate);
+      out.push(cookie);
+    }
+    console.log('[cookies] loaded ' + out.length + ' cookies from FB_COOKIES');
+    return out;
+  } catch (e) {
+    console.log('[cookies] failed to parse FB_COOKIES: ' + e.message);
+    return [];
+  }
 }
 
 async function launchBrowser(headful) {
@@ -24,7 +52,7 @@ async function launchBrowser(headful) {
   }
 }
 
-async function createContext(browser) {
+async function createContext(browser, cookies) {
   var ctx = await browser.newContext({
     locale: 'en-US',
     timezoneId: 'America/New_York',
@@ -43,6 +71,10 @@ async function createContext(browser) {
     Object.defineProperty(navigator, 'languages', { get: function() { return ['en-US', 'en']; } });
     window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {} };
   });
+  if (cookies && cookies.length > 0) {
+    await ctx.addCookies(cookies);
+    console.log('[cookies] injected into browser context');
+  }
   return ctx;
 }
 
@@ -233,8 +265,9 @@ async function scrapeMetaAds(competitor, options) {
     return { ads: [], finalUrl: finalUrlInput, cookieAccepted: false, loginWall: false, adLinksFound: 0 };
   }
 
+  var cookies = loadCookies();
   var browser = await launchBrowser(headful);
-  var context = await createContext(browser);
+  var context = await createContext(browser, cookies);
   var page = await context.newPage();
   var finalUrl = finalUrlInput;
   var adMap = new Map();
@@ -303,7 +336,10 @@ async function scrapeMetaAds(competitor, options) {
   }
 
   var loginWall = await isLoginWall(page);
-  if (loginWall) { try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) {} }
+  if (loginWall) {
+    console.log('[scrape] Login wall detected — cookies may be expired');
+    try { await page.screenshot({ path: '/tmp/debug.png', fullPage: true }); } catch (e) {}
+  }
 
   var domLinks = await domFallback(page, adMap);
 
