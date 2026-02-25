@@ -11,11 +11,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Print commit SHA
-        run: |
-          echo "GITHUB_SHA=$GITHUB_SHA"
-          git rev-parse HEAD
-          git log -1 --oneline
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -32,6 +27,7 @@ jobs:
           DISCOVERY_LIMIT: ${{ secrets.DISCOVERY_LIMIT }}
           COUNTRIES: ${{ secrets.COUNTRIES }}
           COMPETITOR_URLS: ${{ secrets.COMPETITOR_URLS }}
+          FB_COOKIES: ${{ secrets.FB_COOKIES }}
         run: npm run scrape
       - name: Upload artifacts
         if: always()
